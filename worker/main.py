@@ -17,6 +17,7 @@ class WorkerConfig:
     server_url: str
     worker_id: str
     hostname: str
+    group: str          # пустая строка = одиночный воркер; иначе — базовый hostname машины
     poll_interval: float
     progress_step: int
     request_timeout: float
@@ -42,11 +43,11 @@ class MasterClient:
         self.retries = retries
         self.retry_backoff = retry_backoff
 
-    def register(self, worker_id: str, hostname: str) -> None:
-        self._post("/workers/register", {"worker_id": worker_id, "hostname": hostname})
+    def register(self, worker_id: str, hostname: str, group: str = "") -> None:
+        self._post("/workers/register", {"worker_id": worker_id, "hostname": hostname, "group": group})
 
-    def health(self, worker_id: str, hostname: str) -> dict[str, Any]:
-        return self._post("/workers/health", {"worker_id": worker_id, "hostname": hostname})
+    def health(self, worker_id: str, hostname: str, group: str = "") -> dict[str, Any]:
+        return self._post("/workers/health", {"worker_id": worker_id, "hostname": hostname, "group": group})
 
     def progress(
         self,
@@ -169,7 +170,7 @@ def run(config: WorkerConfig) -> None:
 
     while True:
         try:
-            client.register(config.worker_id, config.hostname)
+            client.register(config.worker_id, config.hostname, config.group)
             break
         except KeyboardInterrupt:
             return
@@ -188,7 +189,7 @@ def run(config: WorkerConfig) -> None:
 
     while True:
         try:
-            state = client.health(config.worker_id, config.hostname)
+            state = client.health(config.worker_id, config.hostname, config.group)
             if not state.get("enabled", True):
                 time.sleep(config.poll_interval)
                 continue
@@ -218,6 +219,7 @@ def run_pool(config: WorkerConfig) -> None:
             config,
             worker_id=f"{config.worker_id}-{index}",
             hostname=f"{config.hostname} #{index}",
+            group=config.hostname,   # базовый hostname как ключ группы в UI
         )
         process = multiprocessing.Process(target=run, args=(worker_config,), daemon=False)
         process.start()
@@ -264,6 +266,7 @@ def parse_args() -> WorkerConfig:
         server_url=args.server_url,
         worker_id=args.worker_id,
         hostname=args.hostname,
+        group="",
         poll_interval=args.poll_interval,
         progress_step=args.progress_step,
         request_timeout=args.request_timeout,

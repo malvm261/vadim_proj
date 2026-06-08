@@ -21,6 +21,7 @@ router = APIRouter(prefix="/workers", tags=["workers"])
 class RegisterRequest(BaseModel):
     worker_id: str
     hostname: str
+    group: Optional[str] = None
 
 
 class WorkerIDRequest(BaseModel):
@@ -30,6 +31,7 @@ class WorkerIDRequest(BaseModel):
 class HealthRequest(BaseModel):
     worker_id: str
     hostname: Optional[str] = None
+    group: Optional[str] = None
 
 
 class ProgressRequest(BaseModel):
@@ -49,7 +51,7 @@ class ResultRequest(BaseModel):
 
 @router.post("/register", summary="Регистрация воркера")
 def register(req: RegisterRequest):
-    coordinator.register_worker(req.worker_id, req.hostname)
+    coordinator.register_worker(req.worker_id, req.hostname, req.group or "")
     return {"ok": True}
 
 
@@ -63,7 +65,7 @@ def heartbeat(req: WorkerIDRequest):
 
 @router.post("/health", summary="Heartbeat и запрос работы одним вызовом")
 def health(req: HealthRequest):
-    return coordinator.health_worker(req.worker_id, req.hostname)
+    return coordinator.health_worker(req.worker_id, req.hostname, req.group)
 
 
 @router.get("/task", summary="Запросить следующий чанк")

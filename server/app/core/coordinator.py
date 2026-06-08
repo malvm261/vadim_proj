@@ -21,10 +21,11 @@ from typing import Optional
 class Worker:
     worker_id: str
     hostname: str
+    group: str = ""                # имя группы (базовый hostname машины при пуле)
     registered_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     enabled: bool = True
-    status: str = "idle"           # idle | working | done | offline
+    status: str = "idle"           # idle | working | done
     current_iteration: int = 0
     partial_sum: float = 0.0       # текущий вклад по активному чанку
     completed_sum: float = 0.0     # подтверждённая сумма по завершённым чанкам
@@ -40,8 +41,10 @@ class Task:
     chunk_size: int
     chunk_count: int
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    # Время, накопленное в предыдущих run-циклах (до пауз)
+    elapsed_accumulated: float = 0.0
+    # Момент начала текущего run-цикла; None когда задача остановлена/завершена
+    run_started_at: Optional[float] = None
     status: str = "pending"        # pending | running | stopped | done
 
 
@@ -53,20 +56,22 @@ class Coordinator:
         self.workers: dict[str, Worker] = {}
         self.task: Optional[Task] = None
         self._pending_chunks: list[tuple[int, int]] = []
+        self._chunks_done: int = 0
 
     # ── Воркеры ───────────────────────────────────────────────────────────────
 
-    def register_worker(self, worker_id: str, hostname: str) -> None:
+    def register_worker(self, worker_id: str, hostname: str, group: str = "") -> None:
         with self._lock:
             if worker_id in self.workers:
-                # Переподключение — сбрасываем статус, сохраняем историю
                 self.workers[worker_id].hostname = hostname
+                self.workers[worker_id].group = group
                 self.workers[worker_id].status = "idle"
                 self.workers[worker_id].last_seen = time.time()
             else:
                 self.workers[worker_id] = Worker(
                     worker_id=worker_id,
                     hostname=hostname,
+                    group=group,
                 )
 
     def touch_worker(self, worker_id: str) -> bool:
@@ -75,31 +80,38 @@ class Coordinator:
             if worker_id not in self.workers:
                 return False
             self.workers[worker_id].last_seen = time.time()
-            if self.workers[worker_id].status == "offline":
-                self.workers[worker_id].status = "idle"
             return True
 
-    def health_worker(self, worker_id: str, hostname: str | None = None) -> dict:
+    def health_worker(
+        self,
+        worker_id: str,
+        hostname: str | None = None,
+        group: str | None = None,
+    ) -> dict:
         """
-        Heartbeat для клиентов, которые опрашивают мастер раз в секунду.
-        Если воркер свободен и разрешён в UI, сразу возвращаем ему следующий чанк.
+        Heartbeat + запрос работы одним вызовом.
+        Если воркер свободен и разрешён, сразу возвращаем следующий чанк.
         """
         with self._lock:
             if worker_id not in self.workers:
                 self.workers[worker_id] = Worker(
                     worker_id=worker_id,
                     hostname=hostname or worker_id,
+                    group=group or "",
                 )
             else:
                 w = self.workers[worker_id]
                 if hostname:
                     w.hostname = hostname
+                if group is not None:
+                    w.group = group
                 w.last_seen = time.time()
-                if w.status == "offline":
-                    w.status = "idle"
 
         chunk = self.pop_chunk_for_worker(worker_id)
         with self._lock:
+            if worker_id not in self.workers:
+                # Воркер успел удалиться офлайн-ватчером между двумя блоками
+                return {"ok": True, "enabled": False, "task_status": None, "task": None}
             return {
                 "ok": True,
                 "enabled": self.workers[worker_id].enabled,
@@ -117,18 +129,20 @@ class Coordinator:
             w.enabled = enabled
             if not enabled:
                 self._requeue_current_chunk(w)
-                if w.status != "offline":
-                    w.status = "idle"
+                w.status = "idle"
             return True
 
     def mark_offline_workers(self, timeout: int) -> None:
-        """Пометить воркеров, от которых давно не было heartbeat."""
+        """Удалить воркеров, от которых давно не было heartbeat."""
         now = time.time()
         with self._lock:
-            for w in self.workers.values():
-                if now - w.last_seen > timeout and w.status != "offline":
-                    self._requeue_current_chunk(w)
-                    w.status = "offline"
+            to_remove = [
+                wid for wid, w in self.workers.items()
+                if now - w.last_seen > timeout
+            ]
+            for wid in to_remove:
+                self._requeue_current_chunk(self.workers[wid])
+                del self.workers[wid]
 
     # ── Управление задачей ────────────────────────────────────────────────────
 
@@ -161,7 +175,7 @@ class Coordinator:
             effective_chunk_size = max(end - start for start, end in chunks)
 
             active_workers = [
-                w for w in self.workers.values() if w.enabled and w.status != "offline"
+                w for w in self.workers.values() if w.enabled
             ]
             if not active_workers:
                 return "Нет выбранных подключённых воркеров"
@@ -173,28 +187,31 @@ class Coordinator:
                 total_iterations=total_iterations,
                 chunk_size=effective_chunk_size,
                 chunk_count=len(chunks),
-                started_at=time.time(),
+                run_started_at=time.time(),
                 status="running",
             )
-
+            self._chunks_done = 0
             self._pending_chunks = chunks
 
             for w in self.workers.values():
-                if w.status != "offline":
-                    w.status = "idle"
-                    w.current_iteration = 0
-                    w.partial_sum = 0.0
-                    w.completed_sum = 0.0
-                    w.elapsed = 0.0
-                    w.task_start = 0
-                    w.task_end = 0
+                w.status = "idle"
+                w.current_iteration = 0
+                w.partial_sum = 0.0
+                w.completed_sum = 0.0
+                w.elapsed = 0.0
+                w.task_start = 0
+                w.task_end = 0
 
             return ""
 
     def stop_task(self) -> None:
         with self._lock:
-            if not self.task:
+            if not self.task or self.task.status != "running":
                 return
+            # Зафиксировать накопленное время до паузы
+            if self.task.run_started_at is not None:
+                self.task.elapsed_accumulated += time.time() - self.task.run_started_at
+                self.task.run_started_at = None
             for w in self.workers.values():
                 if w.status == "working":
                     self._requeue_current_chunk(w)
@@ -208,10 +225,10 @@ class Coordinator:
                 return "Нет остановленной задачи"
 
             self.task.status = "running"
-            self.task.finished_at = None
+            self.task.run_started_at = time.time()
 
             for w in self.workers.values():
-                if w.enabled and w.status != "offline":
+                if w.enabled:
                     w.status = "idle"
 
             return ""
@@ -234,7 +251,7 @@ class Coordinator:
             start, end = self._pending_chunks.pop(0)
 
             w = self.workers[worker_id]
-            if not w.enabled or w.status == "offline" or w.status == "working":
+            if not w.enabled or w.status == "working":
                 self._pending_chunks.insert(0, (start, end))
                 return None
 
@@ -287,6 +304,7 @@ class Coordinator:
             w.last_seen = time.time()
             w.task_start = 0
             w.task_end = 0
+            self._chunks_done += 1
 
             self._check_completion()
 
@@ -298,10 +316,9 @@ class Coordinator:
 
             task_info = None
             if self.task:
-                elapsed = None
-                if self.task.started_at:
-                    end_ts = self.task.finished_at or time.time()
-                    elapsed = round(end_ts - self.task.started_at, 3)
+                elapsed = self.task.elapsed_accumulated
+                if self.task.run_started_at is not None:
+                    elapsed += time.time() - self.task.run_started_at
 
                 task_info = {
                     "status": self.task.status,
@@ -309,13 +326,15 @@ class Coordinator:
                     "chunk_size": self.task.chunk_size,
                     "chunk_count": self.task.chunk_count,
                     "chunks_remaining": len(self._pending_chunks),
-                    "elapsed": elapsed,
+                    "chunks_done": self._chunks_done,
+                    "elapsed": round(elapsed, 3),
                 }
 
             workers_list = [
                 {
                     "worker_id": w.worker_id,
                     "hostname": w.hostname,
+                    "group": w.group,
                     "enabled": w.enabled,
                     "status": w.status,
                     "current_iteration": w.current_iteration,
@@ -389,9 +408,11 @@ class Coordinator:
         if self._pending_chunks:
             return
         all_done = all(
-            w.status in ("done", "idle", "offline")
+            w.status in ("done", "idle")
             for w in self.workers.values()
         )
         if all_done:
+            if self.task.run_started_at is not None:
+                self.task.elapsed_accumulated += time.time() - self.task.run_started_at
+                self.task.run_started_at = None
             self.task.status = "done"
-            self.task.finished_at = time.time()

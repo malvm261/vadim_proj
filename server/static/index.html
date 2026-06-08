@@ -146,7 +146,7 @@
   .badge-idle    { background: #1f1f2e; color: var(--muted); }
   .badge-working { background: #1a2e1a; color: var(--green); }
   .badge-done    { background: #1a2040; color: var(--blue); }
-  .badge-offline { background: #2e1a1a; color: var(--red); }
+  .badge-mixed   { background: #2a2a1a; color: var(--yellow); }
 
   .bar-wrap { background: var(--border); border-radius: 1px; height: 2px; margin-top: 4px; }
   .bar      { height: 2px; border-radius: 1px; background: var(--green); transition: width .4s; }
@@ -155,6 +155,25 @@
   .worker-check { width: 16px; height: 16px; accent-color: var(--green); cursor: pointer; }
   .worker-check:disabled { cursor: not-allowed; opacity: .35; }
   tr.disabled-worker td { opacity: .55; }
+
+  /* ── Group rows ──────────────────────────────────────────────────── */
+  tr.group-header {
+    background: var(--surface);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  tr.group-header:hover { background: #1a1a24; }
+
+  .group-toggle {
+    display: inline-block;
+    width: 1rem;
+    font-size: 10px;
+    color: var(--muted);
+    margin-right: .3rem;
+  }
+
+  tr.group-child td:nth-child(2) { padding-left: 1.8rem; }
 
   /* ── Right (controls) ────────────────────────────────────────────── */
   .right {
@@ -331,16 +350,17 @@
 </div>
 
 <script>
+  // ── Состояние ──────────────────────────────────────────────────────────────
+  let lastState       = null;
+  let lastTaskStatus  = null;
+  const expandedGroups = new Set();   // группы, развёрнутые пользователем
+
   // ── Polling ────────────────────────────────────────────────────────────────
-  // Обновляем состояние каждую секунду обычным fetch — никаких WebSocket.
-
-  let lastTaskStatus = null;
-
   async function poll() {
     try {
-      const res  = await fetch("/control/state");
-      const data = await res.json();
-      render(data);
+      const res = await fetch("/control/state");
+      lastState = await res.json();
+      render(lastState);
     } catch (e) {
       log("Ошибка связи с мастером: " + e.message, "err");
     }
@@ -366,12 +386,16 @@
     }
 
     // Task meta
-    document.getElementById("statIter").textContent = task ? task.total_iterations.toLocaleString("ru") : "—";
-    document.getElementById("statTime").textContent  = task?.elapsed ? task.elapsed + " с" : "—";
-    document.getElementById("hStatus").textContent   = task?.status ?? "—";
-    document.getElementById("hWorkers").textContent  = workers.length;
-    document.getElementById("hChunks").textContent   = task
-      ? `${task.chunks_remaining.toLocaleString("ru")} / ${task.chunk_count.toLocaleString("ru")}`
+    document.getElementById("statIter").textContent = task
+      ? task.total_iterations.toLocaleString("ru") : "—";
+    document.getElementById("statTime").textContent = task?.elapsed
+      ? task.elapsed + " с" : "—";
+    document.getElementById("hStatus").textContent  = task?.status ?? "—";
+    document.getElementById("hWorkers").textContent = workers.length;
+
+    // Счётчик: выполнено чанков / всего
+    document.getElementById("hChunks").textContent = task
+      ? `${(task.chunks_done ?? 0).toLocaleString("ru")} / ${task.chunk_count.toLocaleString("ru")}`
       : "—";
 
     // Buttons
@@ -386,54 +410,140 @@
       const msgs = {
         running: "Расчёт запущен",
         stopped: "Расчёт остановлен",
-        done:    "Готово! result = " + (result !== null && result !== undefined ? formatNumber(result) : "?"),
+        done:    "Готово! result = " + (result !== null && result !== undefined
+          ? formatNumber(result) : "?"),
       };
       if (msgs[task.status]) log(msgs[task.status], task.status === "done" ? "ok" : "inf");
       lastTaskStatus = task.status;
     }
 
-    // Workers table
+    renderWorkers(workers);
+  }
+
+  // ── Workers table ──────────────────────────────────────────────────────────
+  function renderWorkers(workers) {
     const tbody = document.getElementById("workersBody");
+
     if (workers.length === 0) {
       tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Воркеры не подключены</td></tr>';
       return;
     }
 
-    tbody.innerHTML = workers.map(w => {
-      const range = w.task_range;
-      const pct   = (range && range[1] > range[0])
-        ? Math.min(100, (w.current_iteration - range[0]) / (range[1] - range[0]) * 100)
-        : (w.status === "done" ? 100 : 0);
+    // Разбиваем на группы и одиночных
+    const groupMap  = new Map();   // groupKey -> [workers]
+    const ungrouped = [];
 
-      const iterCell = range
-        ? `${w.current_iteration.toLocaleString("ru")}<span style="color:var(--muted)"> / ${range[1].toLocaleString("ru")}</span>
-           <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>`
-        : "—";
+    for (const w of workers) {
+      if (w.group) {
+        if (!groupMap.has(w.group)) groupMap.set(w.group, []);
+        groupMap.get(w.group).push(w);
+      } else {
+        ungrouped.push(w);
+      }
+    }
 
-      return `<tr class="${w.enabled ? "" : "disabled-worker"}">
-        <td><input class="worker-check" type="checkbox"
-          ${w.enabled ? "checked" : ""}
-          ${w.status === "offline" ? "disabled" : ""}
-          onchange="toggleWorker('${escAttr(w.worker_id)}', this.checked)"></td>
-        <td style="font-weight:700">${esc(w.hostname)}<br>
-            <span style="color:var(--muted);font-size:10px">${esc(w.worker_id)}</span></td>
-        <td><span class="badge badge-${w.status}">${w.status}</span></td>
-        <td>${iterCell}</td>
-        <td style="color:var(--blue)">${w.partial_result !== null && w.partial_result !== undefined ? formatNumber(w.partial_result) : "—"}</td>
-        <td>${w.elapsed ? w.elapsed + " с" : "—"}</td>
-      </tr>`;
-    }).join("");
+    const rows = [];
+
+    // ── Группы ────────────────────────────────────────────────────────
+    for (const [groupKey, members] of groupMap) {
+      const expanded = expandedGroups.has(groupKey);
+
+      // Агрегация
+      const anyWorking  = members.some(w => w.status === "working");
+      const allDone     = members.every(w => w.status === "done");
+      const allIdle     = members.every(w => w.status === "idle");
+      const groupStatus = anyWorking ? "working" : allDone ? "done" : allIdle ? "idle" : "mixed";
+      const hasResult   = members.some(w => w.partial_result !== null && w.partial_result !== undefined);
+      const totalResult = members.reduce((s, w) => s + (w.partial_result ?? 0), 0);
+      const maxElapsed  = Math.max(...members.map(w => w.elapsed || 0));
+      const allEnabled  = members.every(w => w.enabled);
+
+      rows.push(`
+        <tr class="group-header" onclick="toggleGroup('${escAttr(groupKey)}')">
+          <td onclick="event.stopPropagation()">
+            <input class="worker-check" type="checkbox" ${allEnabled ? "checked" : ""}
+              onchange="toggleGroupEnabled('${escAttr(groupKey)}', this.checked)">
+          </td>
+          <td>
+            <span class="group-toggle">${expanded ? "▼" : "▶"}</span>
+            <strong>${esc(groupKey)}</strong>
+            <span class="badge badge-idle" style="margin-left:.4rem">${members.length} CPU</span>
+          </td>
+          <td><span class="badge badge-${groupStatus}">${groupStatus}</span></td>
+          <td>—</td>
+          <td style="color:var(--blue)">${hasResult ? formatNumber(totalResult) : "—"}</td>
+          <td>${maxElapsed ? maxElapsed.toFixed(3) + " с" : "—"}</td>
+        </tr>`);
+
+      if (expanded) {
+        for (const w of members) rows.push(workerRow(w, true));
+      }
+    }
+
+    // ── Одиночные воркеры ──────────────────────────────────────────────
+    for (const w of ungrouped) rows.push(workerRow(w, false));
+
+    tbody.innerHTML = rows.join("");
+  }
+
+  function workerRow(w, indented) {
+    const range = w.task_range;
+    const pct   = (range && range[1] > range[0])
+      ? Math.min(100, (w.current_iteration - range[0]) / (range[1] - range[0]) * 100)
+      : (w.status === "done" ? 100 : 0);
+
+    const iterCell = range
+      ? `${w.current_iteration.toLocaleString("ru")}<span style="color:var(--muted)"> / ${range[1].toLocaleString("ru")}</span>
+         <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>`
+      : "—";
+
+    const childClass = indented ? "group-child" : "";
+    const rowClass   = w.enabled ? childClass : "disabled-worker " + childClass;
+
+    return `<tr class="${rowClass}">
+      <td><input class="worker-check" type="checkbox"
+        ${w.enabled ? "checked" : ""}
+        onchange="toggleWorker('${escAttr(w.worker_id)}', this.checked)"></td>
+      <td style="font-weight:700">${esc(w.hostname)}<br>
+          <span style="color:var(--muted);font-size:10px">${esc(w.worker_id)}</span></td>
+      <td><span class="badge badge-${w.status}">${w.status}</span></td>
+      <td>${iterCell}</td>
+      <td style="color:var(--blue)">${w.partial_result !== null && w.partial_result !== undefined
+        ? formatNumber(w.partial_result) : "—"}</td>
+      <td>${w.elapsed ? w.elapsed + " с" : "—"}</td>
+    </tr>`;
+  }
+
+  // ── Group expand / collapse ────────────────────────────────────────────────
+  function toggleGroup(groupKey) {
+    if (expandedGroups.has(groupKey)) expandedGroups.delete(groupKey);
+    else expandedGroups.add(groupKey);
+    if (lastState) renderWorkers(lastState.workers || []);
+  }
+
+  async function toggleGroupEnabled(groupKey, enabled) {
+    if (!lastState) return;
+    const members = (lastState.workers || []).filter(w => w.group === groupKey);
+    await Promise.all(members.map(w =>
+      fetch(`/control/workers/${encodeURIComponent(w.worker_id)}/enabled`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      })
+    ));
+    log(`${enabled ? "Включена" : "Выключена"} группа ${groupKey}`, "inf");
+    poll();
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────
   async function doStart() {
-    const code  = document.getElementById("codeInput").value;
-    const total = document.getElementById("totalIter").value.trim();
+    const code   = document.getElementById("codeInput").value;
+    const total  = document.getElementById("totalIter").value.trim();
     const chunks = document.getElementById("chunkCount").value.trim();
 
     log(`Запуск: ${formatInteger(total)} итераций, чанков ${formatInteger(chunks)}`, "inf");
 
-    const res  = await fetch("/control/start", {
+    const res = await fetch("/control/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, total_iterations: total, chunk_count: chunks }),
