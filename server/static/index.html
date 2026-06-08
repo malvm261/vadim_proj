@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Distributed Compute</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #0c0c10;
+    --surface: #13131a;
+    --border:  #1f1f2e;
+    --green:   #50fa7b;
+    --red:     #ff5555;
+    --blue:    #8be9fd;
+    --yellow:  #f1fa8c;
+    --muted:   #44475a;
+    --text:    #cdd6f4;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.75rem;
+    color: var(--green);
+    letter-spacing: -1px;
+  }
+
+  .logo em { color: var(--muted); font-style: normal; }
+
+  .header-meta {
+    display: flex;
+    gap: 2rem;
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .header-meta span { color: var(--text); }
+
+  /* ── Layout ──────────────────────────────────────────────────────── */
+  .layout {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 360px;
+  }
+
+  /* ── Left ────────────────────────────────────────────────────────── */
+  .left {
+    padding: 1.75rem 2rem;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+  }
+
+  /* Result card */
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+  }
+
+  .result-number {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: -1px;
+    min-width: 260px;
+  }
+
+  .result-number.stale { color: var(--muted); }
+
+  .result-stats {
+    display: flex;
+    gap: 2.5rem;
+  }
+
+  .stat { display: flex; flex-direction: column; gap: .2rem; }
+  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+  .stat-value { font-weight: 700; color: var(--text); }
+
+  /* Workers */
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--muted);
+    margin-bottom: .6rem;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+
+  thead th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    padding: .4rem .6rem;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+
+  tbody tr { border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--surface); }
+  tbody td { padding: .55rem .6rem; vertical-align: middle; }
+
+  .badge {
+    display: inline-block;
+    padding: .1rem .45rem;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    border-radius: 2px;
+  }
+
+  .badge-idle    { background: #1f1f2e; color: var(--muted); }
+  .badge-working { background: #1a2e1a; color: var(--green); }
+  .badge-done    { background: #1a2040; color: var(--blue); }
+  .badge-offline { background: #2e1a1a; color: var(--red); }
+
+  .bar-wrap { background: var(--border); border-radius: 1px; height: 2px; margin-top: 4px; }
+  .bar      { height: 2px; border-radius: 1px; background: var(--green); transition: width .4s; }
+
+  .empty-row td { text-align: center; padding: 2.5rem; color: var(--muted); font-style: italic; }
+  .worker-check { width: 16px; height: 16px; accent-color: var(--green); cursor: pointer; }
+  .worker-check:disabled { cursor: not-allowed; opacity: .35; }
+  tr.disabled-worker td { opacity: .55; }
+
+  /* ── Right (controls) ────────────────────────────────────────────── */
+  .right {
+    padding: 1.75rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  label {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    margin-bottom: .35rem;
+  }
+
+  textarea, input[type=number], input[type=text] {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: .5rem .7rem;
+    border-radius: 2px;
+    outline: none;
+    transition: border-color .2s;
+    resize: vertical;
+  }
+
+  textarea:focus, input:focus { border-color: var(--green); }
+  .code-area { min-height: 160px; line-height: 1.65; }
+
+  .row { display: flex; gap: .75rem; }
+  .row > * { flex: 1; }
+
+  /* Buttons */
+  .btn {
+    width: 100%;
+    padding: .65rem;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all .15s;
+  }
+
+  .btn-start  { background: var(--green);  color: #0c0c10; border-color: var(--green); }
+  .btn-start:hover:not(:disabled) { filter: brightness(1.15); }
+
+  .btn-stop   { background: transparent; color: var(--red);    border-color: var(--red); }
+  .btn-stop:hover:not(:disabled)  { background: rgba(255,85,85,.1); }
+
+  .btn-resume { background: transparent; color: var(--blue);   border-color: var(--blue); }
+  .btn-resume:hover:not(:disabled) { background: rgba(139,233,253,.1); }
+
+  .btn:disabled { opacity: .25; cursor: not-allowed; }
+
+  /* Log */
+  .log {
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
+    max-height: 150px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+
+  .log-row { display: flex; gap: .75rem; font-size: 11px; line-height: 1.5; }
+  .log-ts  { color: var(--muted); flex-shrink: 0; }
+  .log-ok  { color: var(--green); }
+  .log-err { color: var(--red); }
+  .log-inf { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">calc<em>dist</em></div>
+
+  <div class="header-meta">
+    <div>статус&nbsp;<span id="hStatus">—</span></div>
+    <div>воркеров&nbsp;<span id="hWorkers">0</span></div>
+    <div>чанков&nbsp;<span id="hChunks">—</span></div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- Left -->
+  <div class="left">
+
+    <div class="result-card">
+      <div class="result-number stale" id="resultNumber">result = —</div>
+      <div class="result-stats">
+        <div class="stat">
+          <div class="stat-label">Итераций</div>
+          <div class="stat-value" id="statIter">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Прошло</div>
+          <div class="stat-value" id="statTime">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Вычислительные узлы</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Расчёт</th>
+            <th>Узел / ID</th>
+            <th>Статус</th>
+            <th>Итерация</th>
+            <th>Частичный результат</th>
+            <th>Время, с</th>
+          </tr>
+        </thead>
+        <tbody id="workersBody">
+          <tr class="empty-row"><td colspan="6">Воркеры не подключены</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+
+  <!-- Right -->
+  <div class="right">
+
+    <div>
+      <label>Код функции compute(start, end)</label>
+      <textarea class="code-area" id="codeInput">def compute(start, end):
+    # Пример: интеграл 4 / (1 + x*x) на [0, 1].
+    # TOTAL_ITERATIONS приходит от мастера и равно полю "Итераций всего".
+    a = 0.0
+    b = 1.0
+    dx = (b - a) / TOTAL_ITERATIONS
+
+    result = 0.0
+    for i in range(start, end):
+        x = a + (i + 0.5) * dx
+        result += 4.0 / (1.0 + x * x) * dx
+    return result</textarea>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Итераций всего</label>
+        <input type="text" inputmode="numeric" id="totalIter" value="10000000">
+      </div>
+      <div>
+        <label>Количество чанков</label>
+        <input type="text" inputmode="numeric" id="chunkCount" value="20">
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:.5rem">
+      <button class="btn btn-start"  id="btnStart"  onclick="doStart()">▶  Запустить</button>
+      <button class="btn btn-stop"   id="btnStop"   onclick="doStop()"   disabled>■  Остановить</button>
+      <button class="btn btn-resume" id="btnResume" onclick="doResume()" disabled>↺  Продолжить</button>
+    </div>
+
+    <div class="log" id="log"></div>
+
+  </div>
+</div>
+
+<script>
+  // ── Polling ────────────────────────────────────────────────────────────────
+  // Обновляем состояние каждую секунду обычным fetch — никаких WebSocket.
+
+  let lastTaskStatus = null;
+
+  async function poll() {
+    try {
+      const res  = await fetch("/control/state");
+      const data = await res.json();
+      render(data);
+    } catch (e) {
+      log("Ошибка связи с мастером: " + e.message, "err");
+    }
+  }
+
+  setInterval(poll, 1000);
+  poll();
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  function render(state) {
+    const task    = state.task;
+    const workers = state.workers || [];
+    const result  = state.result;
+
+    // Result card
+    const resultEl = document.getElementById("resultNumber");
+    if (result !== null && result !== undefined) {
+      resultEl.textContent = "result = " + formatNumber(result);
+      resultEl.classList.remove("stale");
+    } else {
+      resultEl.textContent = "result = —";
+      resultEl.classList.add("stale");
+    }
+
+    // Task meta
+    document.getElementById("statIter").textContent = task ? task.total_iterations.toLocaleString("ru") : "—";
+    document.getElementById("statTime").textContent  = task?.elapsed ? task.elapsed + " с" : "—";
+    document.getElementById("hStatus").textContent   = task?.status ?? "—";
+    document.getElementById("hWorkers").textContent  = workers.length;
+    document.getElementById("hChunks").textContent   = task
+      ? `${task.chunks_remaining.toLocaleString("ru")} / ${task.chunk_count.toLocaleString("ru")}`
+      : "—";
+
+    // Buttons
+    const running = task?.status === "running";
+    const stopped = task?.status === "stopped";
+    document.getElementById("btnStart").disabled  = running;
+    document.getElementById("btnStop").disabled   = !running;
+    document.getElementById("btnResume").disabled = !stopped;
+
+    // Уведомление при смене статуса
+    if (task && task.status !== lastTaskStatus) {
+      const msgs = {
+        running: "Расчёт запущен",
+        stopped: "Расчёт остановлен",
+        done:    "Готово! result = " + (result !== null && result !== undefined ? formatNumber(result) : "?"),
+      };
+      if (msgs[task.status]) log(msgs[task.status], task.status === "done" ? "ok" : "inf");
+      lastTaskStatus = task.status;
+    }
+
+    // Workers table
+    const tbody = document.getElementById("workersBody");
+    if (workers.length === 0) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Воркеры не подключены</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = workers.map(w => {
+      const range = w.task_range;
+      const pct   = (range && range[1] > range[0])
+        ? Math.min(100, (w.current_iteration - range[0]) / (range[1] - range[0]) * 100)
+        : (w.status === "done" ? 100 : 0);
+
+      const iterCell = range
+        ? `${w.current_iteration.toLocaleString("ru")}<span style="color:var(--muted)"> / ${range[1].toLocaleString("ru")}</span>
+           <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>`
+        : "—";
+
+      return `<tr class="${w.enabled ? "" : "disabled-worker"}">
+        <td><input class="worker-check" type="checkbox"
+          ${w.enabled ? "checked" : ""}
+          ${w.status === "offline" ? "disabled" : ""}
+          onchange="toggleWorker('${escAttr(w.worker_id)}', this.checked)"></td>
+        <td style="font-weight:700">${esc(w.hostname)}<br>
+            <span style="color:var(--muted);font-size:10px">${esc(w.worker_id)}</span></td>
+        <td><span class="badge badge-${w.status}">${w.status}</span></td>
+        <td>${iterCell}</td>
+        <td style="color:var(--blue)">${w.partial_result !== null && w.partial_result !== undefined ? formatNumber(w.partial_result) : "—"}</td>
+        <td>${w.elapsed ? w.elapsed + " с" : "—"}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  // ── Actions ────────────────────────────────────────────────────────────────
+  async function doStart() {
+    const code  = document.getElementById("codeInput").value;
+    const total = document.getElementById("totalIter").value.trim();
+    const chunks = document.getElementById("chunkCount").value.trim();
+
+    log(`Запуск: ${formatInteger(total)} итераций, чанков ${formatInteger(chunks)}`, "inf");
+
+    const res  = await fetch("/control/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, total_iterations: total, chunk_count: chunks }),
+    });
+
+    if (res.ok) {
+      log("Задача принята мастером", "ok");
+    } else {
+      const err = await res.json();
+      log("Ошибка: " + (err.detail ?? JSON.stringify(err)), "err");
+    }
+  }
+
+  async function doStop() {
+    await fetch("/control/stop", { method: "POST" });
+    log("Запрос остановки отправлен", "inf");
+  }
+
+  async function doResume() {
+    const res = await fetch("/control/resume", { method: "POST" });
+    if (res.ok) {
+      log("Продолжение запрошено", "inf");
+    } else {
+      const err = await res.json();
+      log("Ошибка: " + (err.detail ?? JSON.stringify(err)), "err");
+    }
+  }
+
+  async function toggleWorker(workerId, enabled) {
+    const res = await fetch(`/control/workers/${encodeURIComponent(workerId)}/enabled`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+
+    if (res.ok) {
+      log(`${enabled ? "Включён" : "Выключен"} воркер ${workerId}`, "inf");
+      poll();
+    } else {
+      const err = await res.json();
+      log("Ошибка: " + (err.detail ?? JSON.stringify(err)), "err");
+    }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function log(msg, type = "inf") {
+    const box = document.getElementById("log");
+    const ts  = new Date().toLocaleTimeString("ru");
+    const row = document.createElement("div");
+    row.className = "log-row";
+    row.innerHTML = `<span class="log-ts">${ts}</span><span class="log-${type}">${esc(msg)}</span>`;
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function escAttr(s) {
+    return esc(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
+  }
+
+  function formatNumber(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return String(value);
+    if (Math.abs(n) >= 1e6 || (Math.abs(n) > 0 && Math.abs(n) < 1e-6)) {
+      return n.toExponential(8);
+    }
+    return n.toPrecision(12).replace(/\.?0+$/, "");
+  }
+
+  function formatInteger(value) {
+    const digits = String(value).replace(/\D/g, "");
+    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  }
+</script>
+</body>
+</html>
